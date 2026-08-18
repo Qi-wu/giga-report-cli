@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "GIGA Local Login Handoff",
+  "version": "1.1.0",
+  "description": "Fills GIGA credentials from a one-time local Python handoff.",
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.gigab2b.com/*", "https://gigab2b.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
