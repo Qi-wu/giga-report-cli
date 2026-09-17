@@ -6,45 +6,39 @@ import path from "node:path";
 import crypto from "node:crypto";
 import process from "node:process";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { dateParts, loadConfig } from "./giga-config.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 
-const HOME_URL = "https://www.gigab2b.com/index.php?route=common/home";
 const WISHLIST_URL = "https://www.gigab2b.com/index.php?route=account/wishlist";
 const DOWNLOAD_CENTER_URL = "https://www.gigab2b.com/index.php?route=account/download_central";
-const DEFAULT_BASE_DIR = String.raw`E:\Dux(德国)库存调整`;
 const DEFAULT_PROFILE_DIR = path.resolve("work", "giga-playwright-profile");
-const BROWSER_CANDIDATES = [
-  String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-  String.raw`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
-  String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-  String.raw`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-];
 
 function parseArgs(argv) {
   const options = {
-    baseDir: DEFAULT_BASE_DIR,
+    configPath: "giga-report.json",
+    baseDir: null,
     profileDir: DEFAULT_PROFILE_DIR,
     headed: true,
     force: false,
     dryRun: false,
     timeoutMinutes: 20,
-    cdpUrl: "http://127.0.0.1:9223",
-    timeZone: "Asia/Shanghai",
+    cdpUrl: "http://127.0.0.1:9224",
     resumeFilename: null,
     resumeTime: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--base-dir") options.baseDir = argv[++i];
+    if (arg === "--config-path") options.configPath = argv[++i];
+    else if (arg === "--base-dir") options.baseDir = argv[++i];
     else if (arg === "--profile-dir") options.profileDir = path.resolve(argv[++i]);
     else if (arg === "--headless") options.headed = false;
     else if (arg === "--force") options.force = true;
     else if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--timeout-minutes") options.timeoutMinutes = Number(argv[++i]);
     else if (arg === "--cdp-url") options.cdpUrl = argv[++i];
-    else if (arg === "--time-zone") options.timeZone = argv[++i];
     else if (arg === "--resume-filename") options.resumeFilename = argv[++i];
     else if (arg === "--resume-time") options.resumeTime = argv[++i];
     else if (arg === "--help" || arg === "-h") options.help = true;
@@ -61,31 +55,21 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(String.raw`
-下载 GIGA 美国基础产品报表
+下载 GIGA 基础产品报表
 
 用法:
-  .\run-giga-report.ps1 [参数]
+  .\giga-report.ps1 [参数]
 
 参数:
-  --force                 即使今天已有有效报表也继续下载
+  --config-path <文件>    JSON 配置文件，默认 giga-report.json
+  --force                 即使目标日期已有有效报表也继续下载
   --headless              无界面运行（首次登录或验证码时不要使用）
   --dry-run               只检查环境、登录状态和页面，不提交任务
-  --base-dir <目录>       归档根目录，默认 E:\Dux(德国)库存调整
+  --base-dir <目录>       覆盖 JSON 中的下载根路径
   --profile-dir <目录>    Playwright 持久化浏览器资料目录
   --timeout-minutes <数>  等待报表生成的最长分钟数，默认 20
-  --cdp-url <URL>          接管已登录普通 Chrome，默认 http://127.0.0.1:9223
+  --cdp-url <URL>          接管已登录普通 Chrome，默认 http://127.0.0.1:9224
 `);
-}
-
-function dateParts(timeZone, now = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(now);
-  const get = (type) => parts.find((part) => part.type === type)?.value;
-  const yyyy = get("year");
-  const mm = get("month");
-  const dd = get("day");
-  return { dashed: `${yyyy}-${mm}-${dd}`, compact: `${yyyy}${mm}${dd}` };
 }
 
 async function sha256(filePath) {
@@ -110,11 +94,11 @@ async function validateXlsx(filePath) {
   return stat.size;
 }
 
-async function findExistingValidReport(destinationDir, compactDate) {
+async function findExistingValidReport(destinationDir) {
   try {
     const names = await fsp.readdir(destinationDir);
     for (const name of names) {
-      if (!name.startsWith(`产品信息下载_基础 ${compactDate}`) || !name.toLowerCase().endsWith(".xlsx")) continue;
+      if (!name.startsWith("产品信息下载_基础") || !name.toLowerCase().endsWith(".xlsx")) continue;
       const candidate = path.join(destinationDir, name);
       try {
         await validateXlsx(candidate);
@@ -219,18 +203,38 @@ async function submitBasicReport(page, count) {
   await confirm.click();
 }
 
-async function readNewestTask(page, compactDate) {
-  await page.goto(DOWNLOAD_CENTER_URL, { waitUntil: "domcontentloaded" });
+function extractReportFilename(text) {
+  return text.match(/产品信息下载_基础[^\r\n]*?\.xlsx/)?.[0] || null;
+}
+
+async function findTargetTask(page) {
   const rows = page.getByRole("row");
   const matching = rows.filter({ hasText: "产品信息下载_基础" });
-  const count = await matching.count();
-  if (count < 1) throw new Error("下载中心第一批数据中未找到基础信息下载任务");
-  const row = matching.nth(0);
-  const text = await row.innerText();
-  const filename = text.match(/产品信息下载_基础 \d{8}(?:\(\d+\))?\.xlsx/)?.[0];
-  const applicationTime = text.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)?.[0];
-  if (!filename || !applicationTime) throw new Error(`无法解析新任务: ${text}`);
-  return { filename, applicationTime };
+  for (let index = 0; index < await matching.count(); index += 1) {
+    const row = matching.nth(index);
+    const text = await row.innerText();
+    const filename = extractReportFilename(text);
+    const applicationTime = text.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)?.[0];
+    if (!filename) continue;
+    return {
+      row,
+      filename,
+      applicationTime: applicationTime || "",
+    };
+  }
+  return null;
+}
+
+async function waitForTask(page, timeoutMinutes) {
+  const deadline = Date.now() + timeoutMinutes * 60_000;
+  while (Date.now() < deadline) {
+    await page.goto(DOWNLOAD_CENTER_URL, { waitUntil: "domcontentloaded" });
+    const task = await findTargetTask(page);
+    if (task) return task;
+    console.log("[查询] 下载中心尚未找到文件名称包含 产品信息下载_基础 的报表，继续等待");
+    await page.waitForTimeout(10_000);
+  }
+  throw new Error(`等待下载中心出现文件名称包含 产品信息下载_基础 的报表超过 ${timeoutMinutes} 分钟`);
 }
 
 function parseSizeBytes(text) {
@@ -244,7 +248,8 @@ async function waitUntilDownloadable(page, task, timeoutMinutes) {
   const deadline = Date.now() + timeoutMinutes * 60_000;
   while (Date.now() < deadline) {
     await page.reload({ waitUntil: "domcontentloaded" });
-    const row = page.getByRole("row").filter({ hasText: task.filename }).filter({ hasText: task.applicationTime });
+    let row = page.getByRole("row").filter({ hasText: task.filename });
+    if (task.applicationTime) row = row.filter({ hasText: task.applicationTime });
     const renderDeadline = Math.min(deadline, Date.now() + 30_000);
     let rowCount = await row.count();
     while (rowCount === 0 && Date.now() < renderDeadline) {
@@ -315,11 +320,13 @@ async function archiveReport(source, destinationDir) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) return printHelp();
-  const dates = dateParts(options.timeZone);
-  const destinationDir = path.join(options.baseDir, dates.dashed);
-  const existing = await findExistingValidReport(destinationDir, dates.compact);
+  const config = await loadConfig(options.configPath);
+  const targetDates = dateParts(config.targetDate);
+  const downloadRoot = options.baseDir || config.downloadRoot;
+  const destinationDir = path.join(downloadRoot, targetDates.dashed);
+  const existing = await findExistingValidReport(destinationDir);
   if (existing && !options.force) {
-    console.log(JSON.stringify({ skipped: true, reason: "today_report_exists", path: existing }, null, 2));
+    console.log(JSON.stringify({ skipped: true, reason: "target_date_report_exists", target_date: config.targetDate, path: existing }, null, 2));
     return;
   }
 
@@ -327,7 +334,7 @@ async function main() {
   try {
     browser = await chromium.connectOverCDP(options.cdpUrl);
   } catch {
-    throw new Error(`无法连接普通 Chrome (${options.cdpUrl})。请先运行 open-giga-login.ps1 并保持窗口打开。`);
+    throw new Error(`无法连接普通 Chrome (${options.cdpUrl})。请先运行 open-giga-login-de.ps1 并保持窗口打开。`);
   }
   const context = browser.contexts()[0];
   if (!context) throw new Error("普通 Chrome 没有可接管的浏览器上下文");
@@ -341,40 +348,56 @@ async function main() {
       await page.goto(DOWNLOAD_CENTER_URL, { waitUntil: "domcontentloaded" });
       const row = await waitUntilDownloadable(page, task, options.timeoutMinutes);
       console.log("[4/5] 下载并验证 XLSX");
-      const tempDir = path.resolve("work", "downloads");
+      const tempDir = path.join(path.dirname(config.path), "work", "downloads");
       const downloaded = await downloadTask(page, context, row, task, tempDir);
       console.log("[5/5] 归档报表");
       const result = await archiveReport(downloaded, destinationDir);
-      console.log(JSON.stringify({ ...result, archive_date: dates.dashed, time_zone: options.timeZone }, null, 2));
+      console.log(JSON.stringify({ ...result, archive_date: config.targetDate }, null, 2));
       return;
     }
-    const count = await getWishlistCount(page);
-    console.log(`[2/5] 已登录，全部已收藏 ${count} 个产品`);
     if (options.dryRun) {
-      console.log(JSON.stringify({ dry_run: true, logged_in: true, wishlist_count: count, destination_dir: destinationDir }, null, 2));
+      const count = await getWishlistCount(page);
+      console.log(JSON.stringify({
+        dry_run: true,
+        logged_in: true,
+        wishlist_count: count,
+        target_date: config.targetDate,
+        destination_dir: destinationDir,
+      }, null, 2));
       return;
     }
 
-    console.log("[3/5] 提交基础信息下载任务");
-    await submitBasicReport(page, count);
-    const task = await readNewestTask(page, dates.compact);
+    let task;
+    if (config.targetDate === config.today) {
+      const count = await getWishlistCount(page);
+      console.log(`[2/5] 已登录，全部已收藏 ${count} 个产品`);
+      console.log("[3/5] 提交基础信息下载任务");
+      await submitBasicReport(page, count);
+      await page.goto(DOWNLOAD_CENTER_URL, { waitUntil: "domcontentloaded" });
+      task = await waitForTask(page, options.timeoutMinutes);
+    } else {
+      console.log("[2/5] 已登录，查询下载中心最近的基础信息报表");
+      task = await waitForTask(page, options.timeoutMinutes);
+    }
     console.log(`[任务] ${task.filename} / ${task.applicationTime}`);
     const row = await waitUntilDownloadable(page, task, options.timeoutMinutes);
 
     console.log("[4/5] 下载并验证 XLSX");
-    const tempDir = path.resolve("work", "downloads");
+    const tempDir = path.join(path.dirname(config.path), "work", "downloads");
     const downloaded = await downloadTask(page, context, row, task, tempDir);
     console.log("[5/5] 归档报表");
     const result = await archiveReport(downloaded, destinationDir);
-    console.log(JSON.stringify({ ...result, archive_date: dates.dashed, time_zone: options.timeZone }, null, 2));
+    console.log(JSON.stringify({ ...result, archive_date: config.targetDate }, null, 2));
   } finally {
     // Exiting this CDP client disconnects it; browser.close() would terminate the user's Chrome.
   }
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error(JSON.stringify({ error: error.message, stack: process.env.DEBUG ? error.stack : undefined }, null, 2));
-    process.exit(1);
-  });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
+    .then(() => process.exit(0))
+    .catch((error) => {
+      console.error(JSON.stringify({ error: error.message, stack: process.env.DEBUG ? error.stack : undefined }, null, 2));
+      process.exit(1);
+    });
+}

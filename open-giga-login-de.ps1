@@ -10,7 +10,7 @@ $chromeCandidates = @(
     (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')
 )
 $chrome = $chromeCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-$profile = Join-Path $PSScriptRoot '..\work\giga-de-cdp-profile'
+$profile = Join-Path $PSScriptRoot 'work\giga-de-cdp-profile'
 $url = 'https://www.gigab2b.com/index.php?route=account/wishlist'
 
 if (-not $chrome) {
@@ -27,4 +27,4 @@ Start-Process -FilePath $chrome -ArgumentList @(
 )
 
 Write-Host 'GIGA Germany Chrome opened. Complete any CAPTCHA in this window.'
-Write-Host 'Keep this window open while run-giga-report-de.ps1 continues.'
+Write-Host 'Keep this window open while giga-report.ps1 continues.'

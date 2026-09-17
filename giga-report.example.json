@@ -1,0 +1,11 @@
+{
+  "username": "your-giga-username",
+  "password": "your-giga-password",
+  "downloadRoot": "E:\\Dux(德国)在售库存报表下载",
+  "feishu": {
+    "appId": "cli_xxxxxxxxxxxxxxxxx",
+    "appSecret": "your-feishu-app-secret",
+    "openId": "ou_xxxxxxxxxxxxxxxxx"
+  },
+  "targetDate": null
+}

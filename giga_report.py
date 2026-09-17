@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import socket
@@ -17,29 +16,19 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-WORK_DIR = ROOT.parent / "work"
-PROFILE_DIR = WORK_DIR / "giga-cdp-profile"
+WORK_DIR = ROOT / "work"
+PROFILE_DIR = WORK_DIR / "giga-de-cdp-profile"
+CONFIG_PATH = ROOT / "giga-report.json"
 GIGA_URL = "https://www.gigab2b.com/index.php?route=account/wishlist"
-CDP_PORT = 9223
+CDP_PORT = 9224
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
-INSTANCE_LOCK_PORT = 9222
+INSTANCE_LOCK_PORT = 9225
 RUNTIME = Path(r"C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies")
 NODE = RUNTIME / "node" / "bin" / "node.exe"
 NODE_MODULES = RUNTIME / "node" / "node_modules"
 PLAYWRIGHT_SCRIPT = ROOT / "giga-us-basic-report.mjs"
 LOGIN_SCRIPT = ROOT / "giga-login.mjs"
-
-
-def user_environment(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value:
-        return value
-    if os.name != "nt":
-        return None
-    buffer_size = 32767
-    buffer = ctypes.create_unicode_buffer(buffer_size)
-    length = ctypes.windll.kernel32.GetEnvironmentVariableW(name, buffer, buffer_size)
-    return buffer.value if length else None
+NOTIFY_SCRIPT = ROOT / "giga-feishu.mjs"
 
 
 def find_chrome() -> Path:
@@ -99,18 +88,20 @@ def wait_for_cdp(timeout: float = 20) -> None:
 
 
 def run_login(timeout_minutes: int) -> None:
-    username = user_environment("giga_username")
-    password = user_environment("giga_pwd")
-    if not username or not password:
-        raise RuntimeError("缺少系统环境变量 giga_username 或 giga_pwd")
-
     env = os.environ.copy()
     env["NODE_PATH"] = str(NODE_MODULES)
-    env["giga_username"] = username
-    env["giga_pwd"] = password
-    env["GIGA_LOGIN_TIMEOUT_MS"] = str(timeout_minutes * 60_000)
     result = subprocess.run(
-        [str(NODE), str(LOGIN_SCRIPT), CDP_URL], env=env, check=False
+        [
+            str(NODE),
+            str(LOGIN_SCRIPT),
+            "--config-path",
+            str(CONFIG_PATH),
+            "--timeout-ms",
+            str(timeout_minutes * 60_000),
+            CDP_URL,
+        ],
+        env=env,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError("自动填写或登录未完成，请查看上方错误")
@@ -136,8 +127,41 @@ def run_playwright(extra_args: list[str]) -> int:
     env["NODE_PATH"] = str(NODE_MODULES)
     if extra_args[:1] == ["--"]:
         extra_args = extra_args[1:]
-    command = [str(NODE), str(PLAYWRIGHT_SCRIPT), "--cdp-url", CDP_URL, *extra_args]
+    command = [
+        str(NODE),
+        str(PLAYWRIGHT_SCRIPT),
+        "--config-path",
+        str(CONFIG_PATH),
+        "--cdp-url",
+        CDP_URL,
+        *extra_args,
+    ]
     return subprocess.run(command, env=env, check=False).returncode
+
+
+def send_notification(status: str, error_message: str = "") -> None:
+    env = os.environ.copy()
+    env["NODE_PATH"] = str(NODE_MODULES)
+    try:
+        command = [
+            str(NODE),
+            str(NOTIFY_SCRIPT),
+            "--config-path",
+            str(CONFIG_PATH),
+            "--status",
+            status,
+        ]
+        if error_message:
+            command.extend(["--error", error_message])
+        result = subprocess.run(
+            command,
+            env=env,
+            check=False,
+        )
+        if result.returncode != 0:
+            print("飞书通知发送失败。", file=sys.stderr)
+    except OSError as exc:
+        print(f"飞书通知发送失败: {exc}", file=sys.stderr)
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,12 +175,23 @@ def main() -> int:
     args = parse_args()
     instance_lock = acquire_instance_lock()
     chrome = find_chrome()
+    success = False
+    failure_message = ""
     try:
         cdp_process = launch_cdp_chrome(chrome)
         try:
             run_login(args.login_timeout_minutes)
-            return run_playwright(args.playwright_args)
+            result = run_playwright(args.playwright_args)
+            if result != 0:
+                raise RuntimeError(f"GIGA report failed with exit code {result}")
+            success = True
+            return result
+        except Exception as exc:
+            failure_message = str(exc)
+            raise
         finally:
+            status = "success" if success else "failure"
+            send_notification(status, failure_message)
             terminate_process_tree(cdp_process)
     finally:
         instance_lock.close()

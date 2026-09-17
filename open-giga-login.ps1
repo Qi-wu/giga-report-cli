@@ -27,4 +27,4 @@ Start-Process -FilePath $chrome -ArgumentList @(
 )
 
 Write-Host 'GIGA Chrome opened. Complete any CAPTCHA in this window.'
-Write-Host 'Keep this window open while run-giga-report.ps1 continues.'
+Write-Host 'Keep this window open while the report script continues.'
